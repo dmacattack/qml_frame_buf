@@ -19,137 +19,169 @@
 #include <gst/app/gstappsrc.h>
 #include <QVector>
 
+#define USE_RAW_BUF 0
+#define IMG_BUF 1
+
 // member vars
-GstElement *mpPipeline = NULL;
-GstElement *pQmlSrc = NULL;
-QQuickItem *pItem  = NULL;
-QTimer *pTimer = NULL;
-int cnt = 0;
-QString filename = QString("/home/inspectron/Desktop/images/img_%1.jpg").arg(cnt);
-QVector<QString> mImages;
+GstElement *mpPipeline  = NULL; // gst pipeline
+GstElement *pQmlSrc     = NULL; // appsrc
+bool mbIsWhiteBlock     = false;
+uint16_t mWhiteBlock[400*300];
+uint16_t mBlackBlock[400*300];
+const QString mImages[] = // list of images from filesystem
+{
+    "/home/inspectron/Desktop/images/frame_0.jpg",
+    "/home/inspectron/Desktop/images/frame_1.jpg",
+    "/home/inspectron/Desktop/images/frame_2.jpg",
+    "/home/inspectron/Desktop/images/frame_3.jpg",
+    "/home/inspectron/Desktop/images/frame_4.jpg",
+    "/home/inspectron/Desktop/images/frame_5.jpg",
+    "/home/inspectron/Desktop/images/frame_6.jpg",
+    "/home/inspectron/Desktop/images/frame_7.jpg",
+    "/home/inspectron/Desktop/images/frame_8.jpg",
+    "/home/inspectron/Desktop/images/frame_9.jpg",
+    "/home/inspectron/Desktop/images/frame_10.jpg",
+};
 
 // function prototypes
 gboolean bus_call(GstBus *bus, GstMessage *msg, gpointer data);
 void saveToFile(QByteArray buf, QString filename);
+void launchpipeline();
+void pushFrame(GstAppSrc* appsrc);
+void printTimeStamp();
+QByteArray readImage();
+qint64 readImageBuf(char *data);
+void cb_need_data (GstElement *appsrc, guint unused_size, gpointer user_data);
 
 /**
  * @brief launchpipeline - launch a gst pipeline
  */
 void launchpipeline()
 {
-    QString launchString = "";
-#if 0
-    QTextStream(&launchString) << "appsrc name=qmlsrc stream-type=0 is-live=1 ! \
-                                   pngdec ! \
-                                   clockoverlay ! \
-                                   videoconvert ! \
-                                   jpegenc ! \
-                                   filesink location=" << filename;
+    /*
+     * run this pipeline. For some reason you cant seem to use gst_parse_launch
+     *
+     * gst-launch-1.0 \
+     *     appsrc name=qmlsrc stream-type=0 is-live=true ! \
+     *     pngdec ! \
+     *     clockoverlay ! \
+     *     videoconvert ! \
+     *     xvimagesink
+     */
+    mpPipeline               = gst_pipeline_new("pipeline");
+    pQmlSrc                  = gst_element_factory_make("appsrc",       "qmlsrc");
+#if !USE_RAW_BUF
+    GstElement *jpegdec      = gst_element_factory_make("jpegdec",      NULL);
+    GstElement *clockoverlay = gst_element_factory_make("clockoverlay", NULL);
+#endif
+    GstElement *vidconvert   = gst_element_factory_make("videoconvert", NULL);
+    GstElement *xvsink       = gst_element_factory_make("xvimagesink",  NULL);
+
+    // setup the caps
+#if USE_RAW_BUF
+    GstCaps *caps = gst_caps_new_simple("video/x-raw",
+                                        "width",  G_TYPE_INT, 400,
+                                        "height", G_TYPE_INT, 300,
+                                        "format", G_TYPE_STRING, "RGB16",
+                                        "framerate", GST_TYPE_FRACTION, 0, 1,
+                                        NULL);
 #else
-    QTextStream(&launchString) << "appsrc name=qmlsrc stream-type=0 is-live=1 ! \
-                                   pngdec ! \
-                                   clockoverlay ! \
-                                   videoconvert ! \
-                                   xvimagesink";
+    GstCaps *caps = gst_caps_new_simple("image/jpeg",
+                                        "width",  G_TYPE_INT, 400,
+                                        "height", G_TYPE_INT, 300,
+                                        "framerate", GST_TYPE_FRACTION, 0, 1,
+                                        NULL);
+#endif
+    g_object_set(G_OBJECT(pQmlSrc), "caps", caps, NULL);
+
+    // add elements into the pipeline
+#if USE_RAW_BUF
+    gst_bin_add_many(GST_BIN(mpPipeline), pQmlSrc, vidconvert, xvsink, NULL);
+#else
+    gst_bin_add_many(GST_BIN(mpPipeline), pQmlSrc, jpegdec, clockoverlay, vidconvert, xvsink, NULL);
 #endif
 
-    mpPipeline = gst_parse_launch(launchString.toStdString().c_str(), NULL);
+    // link the elements
+#if USE_RAW_BUF
+    gst_element_link_many(pQmlSrc, vidconvert, xvsink, NULL);
+#else
+    gst_element_link_many(pQmlSrc, jpegdec, clockoverlay, vidconvert, xvsink, NULL);
+#endif
+
+    // setup the appsrc props
+    g_object_set (G_OBJECT (pQmlSrc),
+                  "stream-type", 0, // GST_APP_STREAM_TYPE_STREAM
+                  "format", GST_FORMAT_TIME,
+                  "is-live", TRUE,
+                  NULL);
+
+    // set the appsrc callback for need data
+    g_signal_connect (pQmlSrc, "need-data", G_CALLBACK (cb_need_data), NULL);
+
+    qWarning() << "play the pipeline";
     gst_element_set_state (mpPipeline, GST_STATE_PLAYING);
-
-    pQmlSrc = gst_bin_get_by_name(GST_BIN(mpPipeline), "qmlsrc");
-
-    // i think this allows the pipeline to send the eos from element to element rather than the whole pipeline
-    //g_object_set(mPipeline, MESSAGE_FORWARD, TRUE, NULL);
-
-    GstBus *bus = gst_pipeline_get_bus (GST_PIPELINE (mpPipeline));
-    gst_bus_add_watch (bus, bus_call, NULL);
-    gst_object_unref (bus);
-
-    qDebug() << "gst pipeline launched at " << QDateTime::currentDateTime().toString("hh:mm:ss");
 }
 
 /**
  * @brief pushFrame - push a frame into the gst pipeline
- * @param frame - png encoded frame
  */
-void pushFrame(QByteArray frame2)
+void pushFrame(GstAppSrc* appsrc)
 {
     GstFlowReturn ret = GST_FLOW_OK;
-    GstBuffer *buffer = NULL;
-    GstMapInfo info;
+    static GstClockTime timestamp = 0;
+    GstBuffer *buffer;
+    guint size = 0;
 
-    // read the image from file rather than the provided frame
-    QString fil = mImages.at(cnt);
-    QFile f(fil);
-    f.open(QIODevice::ReadOnly| QIODevice::Text);
-    QByteArray frame = f.readAll();
+    // print the timestamp
+    printTimeStamp();
 
-    int len = frame.length();
+    // get a frame
+#if USE_RAW_BUF
+    gpointer pData = (gpointer)(mbIsWhiteBlock ? mWhiteBlock : mBlackBlock);
+    mbIsWhiteBlock = !mbIsWhiteBlock;
+    size = 300*400*2;
+#else
+#if IMG_BUF
+    // read the image without qt complex types
+    char* data = new char[4096];
+    size = readImageBuf(data);
+    gpointer pData = (gpointer)(data);
 
-    qDebug() << fil << "size = " << len;
+#else
+    // read the image into a qbytearray
+    QByteArray img = readImage();
+    size = img.size();
+    gpointer pData = (gpointer)(img.data());
 
-    // allocate a gst buffer
-    buffer = gst_buffer_new_allocate(NULL, len, NULL);
-    gst_buffer_map(buffer, &info, GST_MAP_WRITE);
-    unsigned char* buf = info.data;
+#endif
 
-    // move the frame into the buffer
-    memmove(buf, frame.data(), len);
+#endif
 
-    // update filename
-    filename = QString("/home/inspectron/Desktop/images/img_%1.jpg").arg(cnt);
-    cnt++;
-    qDebug() << "         pushing " << filename;
+    qWarning() << "pushing buffer size " << size;
 
-    if (cnt > 10)
-    {
-        qFatal("stop");
-    }
+    // make a buffer
+    buffer = gst_buffer_new_wrapped_full( (GstMemoryFlags)0,
+                                          pData,
+                                          size,
+                                          0,
+                                          size,
+                                          NULL,
+                                          NULL );
 
-    // push into pipeline
-    ret = gst_app_src_push_buffer(GST_APP_SRC(pQmlSrc), buffer);
+    // add the timestamp (250ms)
+    GST_BUFFER_PTS (buffer) = timestamp;
+    GST_BUFFER_DURATION (buffer) = gst_util_uint64_scale_int (1, GST_SECOND, 4); // (val,num,den)
+    timestamp += GST_BUFFER_DURATION (buffer);
+
+    // push the buffer
+    ret = gst_app_src_push_buffer(appsrc, buffer);
 
     if (ret != GST_FLOW_OK)
     {
         qCritical() << "push error " << ret;
     }
-
-    // cleanup memory
-    gst_buffer_unmap(buffer, &info);
 }
 
-/**
- * @brief captureFrame - capture a frame from the qml
- */
-void captureFrame()
-{
-    QSharedPointer<const QQuickItemGrabResult> grabres = pItem->grabToImage();
-
-    QObject::connect(grabres.data(), &QQuickItemGrabResult::ready, [=]()
-    {
-        QImage x = grabres->image();
-        qDebug() << "qml::ready - imgsz = " << x.byteCount();
-        QByteArray ba;
-        QBuffer buf(&ba);
-        buf.open(QIODevice::WriteOnly);
-        x.save(&buf, "png");
-        buf.close();
-
-        // save this part to a file
-        //QString frameName = QString("/home/inspectron/Desktop/images/frame_%1.png").arg(cnt);
-        //qWarning() << __func__ << "saving frame to " << frameName;
-        //saveToFile(ba, frameName);
-
-        pushFrame(ba);
-    });
-}
-
-void onTimerExp()
-{
-    pushFrame("");
-
-    //captureFrame();
-}
 
 int main(int argc, char *argv[])
 {
@@ -157,145 +189,31 @@ int main(int argc, char *argv[])
 
     QGuiApplication app(argc, argv);
 
-    // create list of images
-    for (int i = 0 ; i < 11 ; i++)
+    // create black and white frames
+    for (int i = 0; i < 400*300; i++)
     {
-        QString f = QString("/home/inspectron/Desktop/images/frame_%1.png").arg(i);
-        mImages.push_back(f);
+        mBlackBlock[i] = 0;
+        mWhiteBlock[i] = 0xffff;
     }
 
+#if 0 // no ui for now
     QQmlApplicationEngine engine;
     engine.load(QUrl(QStringLiteral("qrc:/main.qml")));
     if (engine.rootObjects().isEmpty())
-    {return -1;}
-
-    // create timer
-    pTimer = new QTimer();
-    pTimer->setInterval(500);
-    QObject::connect(pTimer, &QTimer::timeout, onTimerExp);
-
-    QObject *pRoot = engine.rootObjects().first();
-
-    QObject *pFrame = pRoot->findChild<QObject*>("frameboy");
-    qDebug() << "pFrame is null " << (pFrame == NULL);
-
+    {
+        return -1;
+    }
+#endif
 
     // start the pipeline
     launchpipeline();
-
-    // select the qml src object
-    pItem = qobject_cast<QQuickItem*>(pFrame);
-
-    if (pItem != NULL)
-    {
-        pTimer->start();
-    }
-    else
-    {
-        qWarning() << "pItem is null";
-    }
-
-
-
-
-
-#if 0
-    while(true)
-    {
-        // thanks to : https://stackoverflow.com/questions/37439554/save-qml-image-inside-c
-        //qDebug() << "start the grab at " << QDateTime::currentMSecsSinceEpoch();
-
-        QSharedPointer<const QQuickItemGrabResult> grabres = pItem->grabToImage();
-
-        QObject::connect(grabres.data(), &QQuickItemGrabResult::ready, [=]()
-        {
-          //  qDebug() << "saving SS " << QDateTime::currentMSecsSinceEpoch();
-            //pushFrame(grabres->image());
-            QImage x = grabres->image();
-            qDebug() << "imgsz = " << x.byteCount();
-            QByteArray ba;
-            QBuffer buf(&ba);
-            buf.open(QIODevice::WriteOnly);
-            x.save(&buf, "png");
-            buf.close();
-
-            pushFrame(ba);
-
-#if 0
-            auto list = QImageWriter::supportedImageFormats();
-            for (int i = 0; i < list.length(); i++)
-            {
-                qDebug() << list.at(i);
-            }
-
-            "bmp"
-            "cur"
-            "icns"
-            "ico"
-            "jpeg"
-            "jpg"
-            "pbm"
-            "pgm"
-            "png"
-            "ppm"
-            "tif" // 480206 saved. vs 480000 raw
-            "tiff" // 480206 saved. vs 480000 raw
-            "wbmp"
-            "webp"
-            "xbm" // 77065
-            "xpm" // 121279
-
-#endif
-            //qDebug() << "buffer len = " << ba.length();
-            //saveToFile(ba);
-
-
-            // save the frame to the filesystem
-            //grabres->saveToFile("/home/inspectron/Desktop/frame.png");
-        });
-
-        QThread::msleep(200);
-
-    }
-#endif
-
-
-
-
-#if 0
-    QObject *pRoot = engine.rootObjects().first();
-
-#if 1
-    QObject *pFrame = pRoot->findChild<QObject*>("frameboy");
-    qDebug() << "pFrame is null " << (pFrame == NULL);
-#endif
-
-    GrabWindow grab;
-    grab.setResizeMode( QQuickView::SizeViewToRootObject );
-    //grab.setSource(QUrl(QStringLiteral("qrc:/main.qml")));
-    grab.setContent(QUrl(QStringLiteral("qrc:/main.qml")),NULL, pFrame );
-    //grab.setFlags(Qt::Popup);
-
-    QObject::connect(&grab, &GrabWindow::changeImage, [](QImage img)
-    {
-        qDebug() << "image changed " << img.size();
-    });
-
-//    grab.show();
-
-#endif
-
 
     return app.exec();
 }
 
 
 /**
- * @brief bus_call - bus callback
- * @param bus
- * @param msg
- * @param data
- * @return
+ * @brief bus_call - gstreamer bus callback
  */
 gboolean bus_call(GstBus *bus, GstMessage *msg, gpointer data)
 {
@@ -334,11 +252,14 @@ gboolean bus_call(GstBus *bus, GstMessage *msg, gpointer data)
     return TRUE;
 }
 
+/**
+ * @brief saveToFile - save the given buffer to the file system
+ */
 void saveToFile(QByteArray buf, QString filename)
 {
     QFile f(filename);
 
-    if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+    if (f.open(QIODevice::WriteOnly))
     {
         qDebug() << "write buff to file";
         f.write(buf);
@@ -348,4 +269,82 @@ void saveToFile(QByteArray buf, QString filename)
     {
         qWarning() << "couldnt open the file";
     }
+}
+
+
+/**
+ * @brief printTimeStamp - print how long its been in ms
+ */
+void printTimeStamp()
+{
+    static qint64 dt = 0;
+
+    if (dt == 0)
+    {
+        dt = QDateTime::currentMSecsSinceEpoch();
+    }
+    else
+    {
+        qint64 now = QDateTime::currentMSecsSinceEpoch();
+        qint64 ts = now - dt;
+        qDebug() << "timestamp = " << ts;
+        dt = now;
+    }
+}
+
+/**
+ * @brief readImage - read an image from the filesystem
+ * @return
+ */
+QByteArray readImage()
+{
+    static int cnt = 0;
+
+    if (cnt > 10)
+    {
+        qFatal("stop");
+    }
+
+    QString fil = mImages[cnt++];
+    qWarning() << "reading " << fil;
+    QFile f(fil);
+    f.open(QIODevice::ReadOnly);
+    QByteArray frame = f.readAll();
+    return frame;
+}
+
+/**
+ * @brief readImageBuf - read the image into the given buffer
+ */
+qint64 readImageBuf(char *data)
+{
+    static int cnt = 0;
+
+    if (cnt > 10)
+    {
+        qFatal("stop");
+    }
+
+    QString fil = mImages[cnt++];
+    QFile f(fil);
+    f.open(QIODevice::ReadOnly);
+    qint64 len = f.read(data, 4096);
+
+    qWarning() << "read " << fil << "len = " << len;
+
+    return len;
+}
+
+/**
+ * @brief cb_need_data - need data callback - update the want flag
+ */
+void cb_need_data (GstElement *appsrc, guint unused_size, gpointer user_data)
+{
+    Q_UNUSED(appsrc);
+    Q_UNUSED(unused_size);
+    Q_UNUSED(user_data);
+  //prepare_buffer((GstAppSrc*)appsrc);
+
+    qDebug() << "need data";
+    pushFrame((GstAppSrc*)pQmlSrc);
 }
