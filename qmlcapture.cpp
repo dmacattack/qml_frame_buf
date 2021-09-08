@@ -11,8 +11,6 @@
 // anonymous namespace
 namespace
 {
-    const int FRAME_WD = 400; // TODO should be a variable
-    const int FRAME_HT = 300; // TODO should be a variable
 }
 
 // static initialization
@@ -27,6 +25,8 @@ QmlCapture::QmlCapture()
 , mpQmlSrc       (NULL)
 , mpQuickItem    (NULL)
 , mpCaptureTimer (new QTimer())
+, mFrameWidth    (0)
+, mFrameHeight   (0)
 , mGrabRes       ()
 , mFrame         ()
 {
@@ -85,8 +85,13 @@ void QmlCapture::stopVideo()
  */
 void QmlCapture::toVideoSink(QObject *pObj)
 {
+    int w = pObj->property("width").toInt();
+    int h = pObj->property("height").toInt();
+    qDebug() << "object wxh = " << w << "x" << h;
     // setup the quick item
     mpQuickItem = qobject_cast<QQuickItem*>(pObj);
+
+
 
     // launch the sink pipeline
     launchVideoSinkPipeline();
@@ -203,8 +208,8 @@ void QmlCapture::launchVideoSinkPipeline()
     // setup the caps
     {
         GstCaps *caps = gst_caps_new_simple("image/jpeg",
-                                            "width",  G_TYPE_INT, FRAME_WD,
-                                            "height", G_TYPE_INT, FRAME_HT,
+                                            "width",  G_TYPE_INT, mFrameWidth,
+                                            "height", G_TYPE_INT, mFrameHeight,
                                             "framerate", GST_TYPE_FRACTION, 0, 1,
                                             NULL);
         g_object_set(G_OBJECT(mpQmlSrc), "caps", caps, NULL);

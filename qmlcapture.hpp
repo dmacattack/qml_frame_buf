@@ -55,8 +55,11 @@ private:
     GstElement *mpQmlSrc;
     QQuickItem *mpQuickItem;
     QTimer *mpCaptureTimer;
+    int mFrameWidth;
+    int mFrameHeight;
     QSharedPointer<const QQuickItemGrabResult> mGrabRes;
     QByteArray mFrame;
+
     static CAPTURE::eFRAME_STATUS sFrameStatus;
     static QmlCapture *theCaptureClass;
 
