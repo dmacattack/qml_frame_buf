@@ -16,7 +16,7 @@ namespace
 }
 
 // static initialization
-bool QmlCapture::sAppSrcNeedsData = true;
+CAPTURE::eFRAME_STATUS QmlCapture::sFrameStatus = CAPTURE::eSTATUS_IDLE;
 QmlCapture *QmlCapture::theCaptureClass = NULL;
 
 /**
@@ -27,12 +27,14 @@ QmlCapture::QmlCapture()
 , mpQmlSrc       (NULL)
 , mpQuickItem    (NULL)
 , mpCaptureTimer (new QTimer())
+, mGrabRes       ()
+, mFrame         ()
 {
     // assign static this
     theCaptureClass = this;
 
     // setup timer
-    mpCaptureTimer->setInterval(10);
+    mpCaptureTimer->setInterval(66); // this determines approx framerate
     QObject::connect( mpCaptureTimer, SIGNAL(timeout()), this, SLOT(onCaptureTimerExp()) );
 }
 
@@ -112,13 +114,10 @@ void QmlCapture::onCaptureTimerExp()
     qDebug() << "appsrc needs data " << sAppSrcNeedsData;
 #endif
 
-    if (sAppSrcNeedsData)
+    // just capture the frame
+    if (sFrameStatus == CAPTURE::eSTATUS_IDLE)
     {
         captureFrame();
-    }
-    else
-    {
-        // dont do anything
     }
 }
 
@@ -136,9 +135,9 @@ void QmlCapture::pushFrame(char *buf, guint size)
  * @brief QmlCapture::pushFrame - overloaded function to push a frame into the appsrc
  * @param buf - qbytearray frame
  */
-void QmlCapture::pushFrame(QByteArray &buf)
+void QmlCapture::pushFrame()
 {
-    pushFrame((gpointer)(buf.data()), buf.size());
+    pushFrame((gpointer)(mFrame.data()), mFrame.size());
 }
 
 /**
@@ -149,7 +148,6 @@ void QmlCapture::pushFrame(QByteArray &buf)
 void QmlCapture::pushFrame(gpointer buf, guint size)
 {
     GstFlowReturn ret = GST_FLOW_OK;
-    static GstClockTime timestamp = 0;
     GstBuffer *buffer = NULL;
 
 #if DBG_BLOCK
@@ -168,11 +166,6 @@ void QmlCapture::pushFrame(gpointer buf, guint size)
                                           NULL,              // user_data
                                           NULL );            // notify
 
-    // add the timestamp
-    GST_BUFFER_PTS (buffer) = timestamp;
-    GST_BUFFER_DURATION (buffer) = gst_util_uint64_scale_int (1, GST_SECOND, 15); // (val,num,den)
-    timestamp += GST_BUFFER_DURATION (buffer);
-
     // push the buffer
     ret = gst_app_src_push_buffer( GST_APP_SRC(mpQmlSrc), buffer );
 
@@ -180,6 +173,8 @@ void QmlCapture::pushFrame(gpointer buf, guint size)
     {
         qCritical() << "push error " << ret;
     }
+
+    sFrameStatus = CAPTURE::eSTATUS_IDLE;
 }
 
 /**
@@ -199,23 +194,36 @@ void QmlCapture::launchVideoSinkPipeline()
     mpPipeline               = gst_pipeline_new        ("pipeline"             );
     mpQmlSrc                 = gst_element_factory_make("appsrc",      "qmlsrc");
     GstElement *jpegdec      = gst_element_factory_make("jpegdec",      NULL   );
+    GstElement *videorate    = gst_element_factory_make("videorate",    NULL   );
+    GstElement *vrcaps       = gst_element_factory_make("capsfilter",   NULL   );
     GstElement *clockoverlay = gst_element_factory_make("clockoverlay", NULL   );
     GstElement *vidconvert   = gst_element_factory_make("videoconvert", NULL   );
     GstElement *xvsink       = gst_element_factory_make("xvimagesink",  NULL   );
 
     // setup the caps
-    GstCaps *caps = gst_caps_new_simple("image/jpeg",
-                                        "width",  G_TYPE_INT, FRAME_WD,
-                                        "height", G_TYPE_INT, FRAME_HT,
-                                        "framerate", GST_TYPE_FRACTION, 0, 1,
-                                        NULL);
-    g_object_set(G_OBJECT(mpQmlSrc), "caps", caps, NULL);
+    {
+        GstCaps *caps = gst_caps_new_simple("image/jpeg",
+                                            "width",  G_TYPE_INT, FRAME_WD,
+                                            "height", G_TYPE_INT, FRAME_HT,
+                                            "framerate", GST_TYPE_FRACTION, 0, 1,
+                                            NULL);
+        g_object_set(G_OBJECT(mpQmlSrc), "caps", caps, NULL);
+        gst_caps_unref(caps);
+    }
+
+    {
+        GstCaps *caps = gst_caps_new_simple("video/x-raw",
+                                            "framerate", GST_TYPE_FRACTION, 15, 1,
+                                            NULL);
+        g_object_set(G_OBJECT(vrcaps), "caps", caps, NULL);
+        gst_caps_unref(caps);
+    }
 
     // add elements into the pipeline
-    gst_bin_add_many(GST_BIN(mpPipeline), mpQmlSrc, jpegdec, clockoverlay, vidconvert, xvsink, NULL);
+    gst_bin_add_many(GST_BIN(mpPipeline), mpQmlSrc, jpegdec, videorate, vrcaps, clockoverlay, vidconvert, xvsink, NULL);
 
     // link the elements
-    gst_element_link_many(mpQmlSrc, jpegdec, clockoverlay, vidconvert, xvsink, NULL);
+    gst_element_link_many(mpQmlSrc, jpegdec, videorate, vrcaps, clockoverlay, vidconvert, xvsink, NULL);
 
     // setup the appsrc props
     g_object_set (G_OBJECT (mpQmlSrc),
@@ -223,9 +231,6 @@ void QmlCapture::launchVideoSinkPipeline()
                   "format", GST_FORMAT_TIME,
                   "is-live", TRUE,
                   NULL);
-
-    // set the appsrc callback for need data
-    g_signal_connect (mpQmlSrc, "need-data", G_CALLBACK (sAppsrcNeedsData), NULL);
 
     qDebug() << "play the pipeline";
     gst_element_set_state (mpPipeline, GST_STATE_PLAYING);
@@ -244,7 +249,9 @@ void QmlCapture::sAppsrcNeedsData(GstElement *appsrc, guint unused_size, gpointe
     Q_UNUSED(user_data);
 
     // set a flag that the appsrc is ready
-    sAppSrcNeedsData = true;
+    // NOTE this callback is unused for now since
+    // you cant grab frames from the qml outside the ui thread
+    // so we simply grab frames on a timer
 }
 
 /**
@@ -274,22 +281,23 @@ void QmlCapture::printTimeStamp()
  */
 void QmlCapture::captureFrame()
 {
-    sAppSrcNeedsData = false;
-    QSharedPointer<const QQuickItemGrabResult> grabres = mpQuickItem->grabToImage();
+    sFrameStatus = CAPTURE::eSTATUS_CAPTURING;
+    mGrabRes = mpQuickItem->grabToImage();
 
-    QObject::connect(grabres.data(), &QQuickItemGrabResult::ready, [=]()
+    QObject::connect(mGrabRes.data(), &QQuickItemGrabResult::ready, [&]()
     {
         // save the image into a byte array using a qbuffer
-        QImage qmlImg = grabres->image();
+        QImage qmlImg = mGrabRes->image();
 #if DBG_BLOCK
         qDebug() << "qml::ready - imgsz = " << qmlImg.byteCount();
 #endif
-        QByteArray ba;
-        QBuffer buf(&ba);
+        QBuffer buf(&mFrame);
         buf.open(QIODevice::WriteOnly);
-        qmlImg.save(&buf, "jpeg"); // TODO make this configurable variable
+        qmlImg.save(&buf, "jpeg", 85);
         buf.close();
-        pushFrame(ba);
+
+        sFrameStatus = CAPTURE::eSTATUS_PUSHING;
+        pushFrame();
     });
 }
 

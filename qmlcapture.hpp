@@ -6,6 +6,17 @@
 #include <QObject>
 #include <QTimer>
 
+namespace CAPTURE
+{
+    enum eFRAME_STATUS
+    {
+        eSTATUS_IDLE,       // ready to capture
+        eSTATUS_READY,      // pipeline needs a frame
+        eSTATUS_CAPTURING,  // capturing qml frame
+        eSTATUS_PUSHING,    // pushing the frame
+    };
+}
+
 /**
  * @brief The QmlCapture class - object to capture a qml object into a video/picture/etc
  */
@@ -31,7 +42,7 @@ private slots:
 
 private:
     void pushFrame(char* buf, guint size);
-    void pushFrame(QByteArray &buf);
+    void pushFrame();
     void pushFrame(gpointer buf, guint size);
     void launchVideoSinkPipeline();
     static void sAppsrcNeedsData(GstElement *appsrc, guint unused_size, gpointer user_data);
@@ -44,7 +55,9 @@ private:
     GstElement *mpQmlSrc;
     QQuickItem *mpQuickItem;
     QTimer *mpCaptureTimer;
-    static bool sAppSrcNeedsData;
+    QSharedPointer<const QQuickItemGrabResult> mGrabRes;
+    QByteArray mFrame;
+    static CAPTURE::eFRAME_STATUS sFrameStatus;
     static QmlCapture *theCaptureClass;
 
 };

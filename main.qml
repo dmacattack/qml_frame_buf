@@ -25,6 +25,15 @@ Window
             height: 100
             anchors.centerIn: parent
 
+            Rectangle
+            {
+                color: "blue"
+                width: parent.width
+                height: 10
+                anchors.top: parent.top
+                anchors.left: parent.left
+            }
+
             Timer
             {
                 interval: 50
