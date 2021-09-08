@@ -11,6 +11,7 @@
 // anonymous namespace
 namespace
 {
+    const int UDP_PORT = 5007;
 }
 
 // static initialization
@@ -54,9 +55,24 @@ QmlCapture::~QmlCapture()
  */
 void QmlCapture::captureImage(QObject *pObj, QString path)
 {
-    // TODO implement
-    Q_UNUSED(pObj);
-    Q_UNUSED(path);
+    // set the qml object
+    setQuickItem(pObj);
+
+    // grab the qml directly into an image
+    mGrabRes = mpQuickItem->grabToImage();
+    QObject::connect(mGrabRes.data(), &QQuickItemGrabResult::ready, [&, path]()
+    {
+        // save the image into a byte array using a qbuffer
+        QImage qmlImg = mGrabRes->image();
+        QByteArray ba;
+        QBuffer buf(&ba);
+        buf.open(QIODevice::WriteOnly);
+        qmlImg.save(&buf, "jpeg", 85);
+        buf.close();
+
+        // save the frame to a file
+        saveToFile(ba, path);
+    });
 }
 
 /**
@@ -85,15 +101,10 @@ void QmlCapture::stopVideo()
  */
 void QmlCapture::toVideoSink(QObject *pObj)
 {
-    int w = pObj->property("width").toInt();
-    int h = pObj->property("height").toInt();
-    qDebug() << "object wxh = " << w << "x" << h;
-    // setup the quick item
-    mpQuickItem = qobject_cast<QQuickItem*>(pObj);
+    // set the qml object
+    setQuickItem(pObj);
 
-
-
-    // launch the sink pipeline
+    // launch the pipeline
     launchVideoSinkPipeline();
 
     // start the capture timer
@@ -106,8 +117,30 @@ void QmlCapture::toVideoSink(QObject *pObj)
  */
 void QmlCapture::toTee(QObject *pObj)
 {
-    // TODO implement
-    Q_UNUSED(pObj);
+    // set the qml object
+    setQuickItem(pObj);
+
+    // launch the pipeline
+    launchVideoTeePipeline();
+
+    // start the capture timer
+    mpCaptureTimer->start();
+}
+
+/**
+ * @brief QmlCapture::toUdpSink - capture the qml to a udpsink, so that it can be picked up later
+ * @param pObj - pointer to qml object to capture
+ */
+void QmlCapture::toUdpSink(QObject *pObj)
+{
+    // set the qml object
+    setQuickItem(pObj);
+
+    // launch the sink pipeline
+    launchUdpSinkPipeline();
+
+    // start the capture timer
+    mpCaptureTimer->start();
 }
 
 /**
@@ -124,6 +157,21 @@ void QmlCapture::onCaptureTimerExp()
     {
         captureFrame();
     }
+}
+
+/**
+ * @brief QmlCapture::setQuickItem - set the qml quick item
+ * @param pObj - pointer to qml object to capture
+ */
+void QmlCapture::setQuickItem(QObject *pObj)
+{
+    // set the dimensions
+    mFrameWidth = pObj->property("width").toInt();
+    mFrameHeight = pObj->property("height").toInt();
+
+    qDebug() << "object wxh = " << mFrameWidth << "x" << mFrameHeight;
+    // setup the quick item
+    mpQuickItem = qobject_cast<QQuickItem*>(pObj);
 }
 
 /**
@@ -189,6 +237,8 @@ void QmlCapture::pushFrame(gpointer buf, guint size)
  *     appsrc name=qmlsrc stream-type=0 is-live=true ! \
  *            caps="image/jpeg,width=400,height=300,framerate=0/1" \
  *     jpegdec ! \
+ *     videorate ! \
+ *     video/x-raw, framerate=15/1 ! \
  *     clockoverlay ! \
  *     videoconvert ! \
  *     xvimagesink
@@ -229,6 +279,60 @@ void QmlCapture::launchVideoSinkPipeline()
 
     // link the elements
     gst_element_link_many(mpQmlSrc, jpegdec, videorate, vrcaps, clockoverlay, vidconvert, xvsink, NULL);
+
+    // setup the appsrc props
+    g_object_set (G_OBJECT (mpQmlSrc),
+                  "stream-type", 0, // GST_APP_STREAM_TYPE_STREAM
+                  "format", GST_FORMAT_TIME,
+                  "is-live", TRUE,
+                  NULL);
+
+    qDebug() << "play the pipeline";
+    gst_element_set_state (mpPipeline, GST_STATE_PLAYING);
+}
+
+/**
+ * @brief QmlCapture::launchVideoTeePipeline
+ */
+void QmlCapture::launchVideoTeePipeline()
+{
+    // TODO implement
+}
+
+/**
+ * @brief QmlCapture::launchUdpSinkPipeline
+ *
+ * gst-launch-1.0 \
+ *     appsrc name=qmlsrc stream-type=0 is-live=true ! \
+ *            caps="image/jpeg,width=400,height=300,framerate=0/1" \
+ *     rtpjpegpay ! \
+ *     udpsink port=<port>
+ */
+void QmlCapture::launchUdpSinkPipeline()
+{
+    mpPipeline               = gst_pipeline_new        ("pipeline"             );
+    mpQmlSrc                 = gst_element_factory_make("appsrc",      "qmlsrc");
+    GstElement *rtpjpegpay   = gst_element_factory_make("rtpjpegpay",   NULL   );
+    GstElement *udpsink      = gst_element_factory_make("udpsink",      NULL   );
+
+    // setup the caps
+    {
+        GstCaps *caps = gst_caps_new_simple("image/jpeg",
+                                            "width",  G_TYPE_INT, mFrameWidth,
+                                            "height", G_TYPE_INT, mFrameHeight,
+                                            "framerate", GST_TYPE_FRACTION, 0, 1,
+                                            NULL);
+        g_object_set(G_OBJECT(mpQmlSrc), "caps", caps, NULL);
+        gst_caps_unref(caps);
+    }
+
+    g_object_set(G_OBJECT(udpsink), "port", UDP_PORT, NULL);
+
+    // add elements into the pipeline
+    gst_bin_add_many(GST_BIN(mpPipeline), mpQmlSrc, rtpjpegpay, udpsink, NULL);
+
+    // link the elements
+    gst_element_link_many(mpQmlSrc, rtpjpegpay, udpsink, NULL);
 
     // setup the appsrc props
     g_object_set (G_OBJECT (mpQmlSrc),

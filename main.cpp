@@ -208,7 +208,7 @@ int main(int argc, char *argv[])
 
     // create the Qml Capture
     QmlCapture *pCapture = new QmlCapture();
-    pCapture->toVideoSink(pFrame);
+    pCapture->toUdpSink(pFrame);
 
     return app.exec();
 }

@@ -33,6 +33,7 @@ public:
     void stopVideo();
     void toVideoSink(QObject *pObj);
     void toTee(QObject *pObj);
+    void toUdpSink(QObject *pObj);
 
 signals:
 // TODO add signal for status update
@@ -41,14 +42,19 @@ private slots:
     void onCaptureTimerExp();
 
 private:
+    void setQuickItem(QObject *pObj);
     void pushFrame(char* buf, guint size);
     void pushFrame();
     void pushFrame(gpointer buf, guint size);
     void launchVideoSinkPipeline();
-    static void sAppsrcNeedsData(GstElement *appsrc, guint unused_size, gpointer user_data);
+    void launchVideoTeePipeline();
+    void launchUdpSinkPipeline();
+
     void printTimeStamp();
     void captureFrame();
     void saveToFile(QByteArray buf, QString filename);
+
+    static void sAppsrcNeedsData(GstElement *appsrc, guint unused_size, gpointer user_data);
 
 private:
     GstElement *mpPipeline;
