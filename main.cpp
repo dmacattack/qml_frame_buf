@@ -17,7 +17,8 @@
 #include <QThread>
 #include <QBuffer>
 #include <gst/app/gstappsrc.h>
-#include <QVector>
+#include "qmlcapture.hpp"
+
 
 #define USE_RAW_BUF 0
 #define IMG_BUF 1
@@ -30,17 +31,17 @@ uint16_t mWhiteBlock[400*300];
 uint16_t mBlackBlock[400*300];
 const QString mImages[] = // list of images from filesystem
 {
-    "/home/inspectron/Desktop/images/frame_0.jpg",
-    "/home/inspectron/Desktop/images/frame_1.jpg",
-    "/home/inspectron/Desktop/images/frame_2.jpg",
-    "/home/inspectron/Desktop/images/frame_3.jpg",
-    "/home/inspectron/Desktop/images/frame_4.jpg",
-    "/home/inspectron/Desktop/images/frame_5.jpg",
-    "/home/inspectron/Desktop/images/frame_6.jpg",
-    "/home/inspectron/Desktop/images/frame_7.jpg",
-    "/home/inspectron/Desktop/images/frame_8.jpg",
-    "/home/inspectron/Desktop/images/frame_9.jpg",
-    "/home/inspectron/Desktop/images/frame_10.jpg",
+    "/home/insp-dev2/workspace/qml_frame_buf/imgs/frame_0.jpg",
+    "/home/insp-dev2/workspace/qml_frame_buf/imgs/frame_1.jpg",
+    "/home/insp-dev2/workspace/qml_frame_buf/imgs/frame_2.jpg",
+    "/home/insp-dev2/workspace/qml_frame_buf/imgs/frame_3.jpg",
+    "/home/insp-dev2/workspace/qml_frame_buf/imgs/frame_4.jpg",
+    "/home/insp-dev2/workspace/qml_frame_buf/imgs/frame_5.jpg",
+    "/home/insp-dev2/workspace/qml_frame_buf/imgs/frame_6.jpg",
+    "/home/insp-dev2/workspace/qml_frame_buf/imgs/frame_7.jpg",
+    "/home/insp-dev2/workspace/qml_frame_buf/imgs/frame_8.jpg",
+    "/home/insp-dev2/workspace/qml_frame_buf/imgs/frame_9.jpg",
+    "/home/insp-dev2/workspace/qml_frame_buf/imgs/frame_10.jpg",
 };
 
 // function prototypes
@@ -170,7 +171,7 @@ void pushFrame(GstAppSrc* appsrc)
 
     // add the timestamp (250ms)
     GST_BUFFER_PTS (buffer) = timestamp;
-    GST_BUFFER_DURATION (buffer) = gst_util_uint64_scale_int (1, GST_SECOND, 4); // (val,num,den)
+    GST_BUFFER_DURATION (buffer) = gst_util_uint64_scale_int (1, GST_SECOND, 10); // (val,num,den)
     timestamp += GST_BUFFER_DURATION (buffer);
 
     // push the buffer
@@ -185,28 +186,29 @@ void pushFrame(GstAppSrc* appsrc)
 
 int main(int argc, char *argv[])
 {
+    // init gstreamer
     gst_init(&argc, &argv);
 
+    // init qml application
     QGuiApplication app(argc, argv);
 
-    // create black and white frames
-    for (int i = 0; i < 400*300; i++)
-    {
-        mBlackBlock[i] = 0;
-        mWhiteBlock[i] = 0xffff;
-    }
-
-#if 0 // no ui for now
     QQmlApplicationEngine engine;
     engine.load(QUrl(QStringLiteral("qrc:/main.qml")));
     if (engine.rootObjects().isEmpty())
     {
+        qCritical("root object is null/empty");
         return -1;
     }
-#endif
 
-    // start the pipeline
-    launchpipeline();
+    // get the root qml object
+    QObject *pRoot = engine.rootObjects().first();
+
+    // get the qml object to record
+    QObject *pFrame = pRoot->findChild<QObject*>("frameboy");
+
+    // create the Qml Capture
+    QmlCapture *pCapture = new QmlCapture();
+    pCapture->toVideoSink(pFrame);
 
     return app.exec();
 }

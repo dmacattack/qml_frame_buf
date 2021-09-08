@@ -4,7 +4,8 @@ QT += qml quick
 CONFIG += c++11
 
 SOURCES += main.cpp \
-    grabwindow.cpp
+    grabwindow.cpp \
+    qmlcapture.cpp
 
 RESOURCES += qml.qrc
 
@@ -31,7 +32,8 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
 
 HEADERS += \
-    grabwindow.hpp
+    grabwindow.hpp \
+    qmlcapture.hpp
 
 
 
